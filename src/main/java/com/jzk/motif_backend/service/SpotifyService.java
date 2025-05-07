@@ -268,7 +268,6 @@ public class SpotifyService {
         }
     }
 
-
     public List<Map<String, Object>> searchTracks(String query) {
         try {
             String accessToken = getAccessToken();
