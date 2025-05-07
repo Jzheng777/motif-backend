@@ -1,5 +1,5 @@
 package com.jzk.motif_backend.service;
-
+import java.util.concurrent.*;
 import com.jzk.motif_backend.model.Users;
 import com.jzk.motif_backend.repo.UserRepo;
 import org.springframework.beans.factory.annotation.Value;
@@ -7,18 +7,15 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
-
 import java.net.URI;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.ArrayList;
-import java.util.HashMap;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
@@ -30,12 +27,18 @@ public class SpotifyService {
 
     @Value("${spotify.client-id}")
     private String clientId;
+    @Value("AQCuamnAUlx_epAlxcAlNbK0gT8UYPaYNY2vRS_1vn7xeMspfeb4hEoRe2zhsqlSW-FlkrQbzKjHlG2V-MKdprRDJ76BpVqx-_AJKMo5D3JVIo2ZK9yLZZsZVFI3xXAomsk")
+    private String refreshToken;
     @Value("${spotify.client-secret}")
     private String clientSecret;
     @Value("${spotify.redirect-uri}")
     private String redirectUri;
     @Value("${spotify.scopes}")
     private String scopes;
+    private String accessToken;
+    private long accessTokenExpiry = 0;
+    @Value("${lastfm.api.key}")
+    private String lastFmApiKey;
 
     private static final String SPOTIFY_API_BASE_URL = "https://api.spotify.com/v1/search";
     private static final String SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
@@ -45,79 +48,6 @@ public class SpotifyService {
         this.restTemplate = restTemplate;
         this.repo = repo;
     }
-
-    public void storeRefreshTokenForUser(String userId, String refreshToken) {
-        Users user = repo.findById(Integer.parseInt(userId))
-                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
-        user.setSpotify(refreshToken); // Assuming the 'spotify' field now stores the refresh token
-        repo.save(user);
-    }
-
-    public URI getSpotifyLoginUrl(String userId) {
-        String spotifyAuthUrl = String.format(
-                "https://accounts.spotify.com/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&state=%s",
-                clientId,
-                URLEncoder.encode(redirectUri, StandardCharsets.UTF_8),
-                URLEncoder.encode(scopes, StandardCharsets.UTF_8),
-                URLEncoder.encode(userId, StandardCharsets.UTF_8)
-        );
-        return URI.create(spotifyAuthUrl);
-    }
-
-    public String refreshAccessToken(String userId) {
-        Users user = repo.findById(Integer.parseInt(userId))
-                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
-        String refreshToken = user.getSpotify();
-
-        String tokenUrl = SPOTIFY_TOKEN_URL;
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        headers.setBasicAuth(clientId, clientSecret);
-
-        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-        body.add("grant_type", "refresh_token");
-        body.add("refresh_token", refreshToken);
-
-        HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-        ResponseEntity<Map> response = restTemplate.exchange(tokenUrl, HttpMethod.POST, request, Map.class);
-
-        Map<String, Object> responseBody = response.getBody();
-        if (responseBody != null && responseBody.containsKey("access_token")) {
-            return (String) responseBody.get("access_token");
-        } else {
-            throw new RuntimeException("Error refreshing access token from Spotify");
-        }
-    }
-
-
-
-
-    public String exchangeAuthorizationCodeForTokens(String code, String userId) {
-        String tokenUrl = SPOTIFY_TOKEN_URL;
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        headers.setBasicAuth(clientId, clientSecret);
-
-        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-        body.add("grant_type", "authorization_code");
-        body.add("code", code);
-        body.add("redirect_uri", redirectUri);
-
-        HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-        ResponseEntity<Map> response = restTemplate.exchange(tokenUrl, HttpMethod.POST, request, Map.class);
-
-        Map<String, Object> responseBody = response.getBody();
-        if (responseBody != null && responseBody.containsKey("refresh_token")) {
-            String refreshToken = (String) responseBody.get("refresh_token");
-            storeRefreshTokenForUser(userId, refreshToken);
-            return refreshToken;
-        } else {
-            throw new RuntimeException("Error fetching refresh token from Spotify");
-        }
-    }
-
-
 
 
     private String getAccessToken() {
@@ -134,6 +64,149 @@ public class SpotifyService {
         );
         return (String) response.getBody().get("access_token");
     }
+
+    private String extractTrackId(String uri) {
+        if (uri.contains("spotify:track:")) {
+            return uri.split(":")[2];
+        } else if (uri.contains("spotify.com/track/")) {
+            return uri.substring(uri.lastIndexOf("/") + 1).split("\\?")[0];
+        }
+        return uri;
+    }
+
+    public List<Map<String, Object>> getRecommendations(String trackUri) throws Exception {
+        String accessToken = getAccessToken();
+        String trackId = extractTrackId(trackUri);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(accessToken);
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+        ObjectMapper mapper = new ObjectMapper();
+
+        // STEP 1: Get track details
+        String trackUrl = "https://api.spotify.com/v1/tracks/" + trackId;
+        ResponseEntity<String> response = restTemplate.exchange(trackUrl, HttpMethod.GET, entity, String.class);
+        JsonNode trackJson = mapper.readTree(response.getBody());
+        String trackName = trackJson.get("name").asText();
+        String artistName = trackJson.get("artists").get(0).get("name").asText();
+
+        // STEP 2: Get similar tracks from Last.fm
+//        String lastFmApiKey = "dfbe04e0f67463a3c1f0474235bfdc12";
+        String lastFmTrackUrl = UriComponentsBuilder.fromHttpUrl("http://ws.audioscrobbler.com/2.0/")
+                .queryParam("method", "track.getsimilar")
+                .queryParam("artist", artistName)
+                .queryParam("track", trackName)
+                .queryParam("api_key", lastFmApiKey)
+                .queryParam("format", "json")
+                .queryParam("limit", 5)
+                .toUriString();
+
+        ResponseEntity<String> lastFmResponse = restTemplate.getForEntity(lastFmTrackUrl, String.class);
+        JsonNode similarTracks = mapper.readTree(lastFmResponse.getBody()).path("similartracks").path("track");
+
+        List<Map<String, Object>> recommendations = new ArrayList<>();
+
+        ExecutorService executor = Executors.newFixedThreadPool(5);
+        List<Future<Map<String, Object>>> futures = new ArrayList<>();
+
+        if (similarTracks.isArray() && similarTracks.size() > 0) {
+            for (JsonNode similar : similarTracks) {
+                futures.add(executor.submit(() -> {
+                    String similarName = similar.get("name").asText();
+                    String similarArtist = similar.get("artist").get("name").asText();
+                    String query = URLEncoder.encode(similarName + " " + similarArtist, StandardCharsets.UTF_8);
+                    String searchUrl = SPOTIFY_API_BASE_URL + "?q=" + query + "&type=track&limit=1";
+
+                    try {
+                        ResponseEntity<String> searchResponse = restTemplate.exchange(searchUrl, HttpMethod.GET, entity, String.class);
+                        JsonNode items = mapper.readTree(searchResponse.getBody()).path("tracks").path("items");
+                        if (items.isArray() && items.size() > 0) {
+                            return convertSpotifyTrackToMap(items.get(0));
+                        }
+                    } catch (HttpClientErrorException ignored) {}
+                    return null;
+                }));
+            }
+
+            for (Future<Map<String, Object>> future : futures) {
+                try {
+                    Map<String, Object> result = future.get();
+                    if (result != null) recommendations.add(result);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // STEP 3: Fallback to similar artists
+        if (recommendations.isEmpty()) {
+            String similarArtistsUrl = UriComponentsBuilder.fromHttpUrl("http://ws.audioscrobbler.com/2.0/")
+                    .queryParam("method", "artist.getsimilar")
+                    .queryParam("artist", URLEncoder.encode(artistName, StandardCharsets.UTF_8))
+                    .queryParam("api_key", lastFmApiKey)
+                    .queryParam("format", "json")
+                    .queryParam("limit", 5)
+                    .toUriString();
+
+            ResponseEntity<String> similarArtistsResp = restTemplate.getForEntity(similarArtistsUrl, String.class);
+            JsonNode similarArtists = mapper.readTree(similarArtistsResp.getBody()).path("similarartists").path("artist");
+
+            List<Future<List<JsonNode>>> artistFutures = new ArrayList<>();
+
+            for (JsonNode artist : similarArtists) {
+                artistFutures.add(executor.submit(() -> {
+                    List<JsonNode> topTracks = new ArrayList<>();
+                    String similarArtistName = artist.get("name").asText();
+                    String query = URLEncoder.encode("artist:" + similarArtistName, StandardCharsets.UTF_8);
+                    String artistSearchUrl = "https://api.spotify.com/v1/search?q=" + query + "&type=artist&limit=1";
+
+                    try {
+                        ResponseEntity<String> artistResp = restTemplate.exchange(artistSearchUrl, HttpMethod.GET, entity, String.class);
+                        JsonNode artistItems = mapper.readTree(artistResp.getBody()).path("artists").path("items");
+                        if (artistItems.isArray() && artistItems.size() > 0) {
+                            String artistId = artistItems.get(0).get("id").asText();
+                            String topTracksUrl = "https://api.spotify.com/v1/artists/" + artistId + "/top-tracks?market=US";
+
+                            ResponseEntity<String> topTracksResp = restTemplate.exchange(topTracksUrl, HttpMethod.GET, entity, String.class);
+                            JsonNode tracks = mapper.readTree(topTracksResp.getBody()).path("tracks");
+
+                            for (JsonNode topTrack : tracks) {
+                                topTracks.add(topTrack);
+                            }
+                        }
+                    } catch (HttpClientErrorException ignored) {}
+
+                    return topTracks;
+                }));
+            }
+
+            List<JsonNode> collectedTracks = new ArrayList<>();
+            for (Future<List<JsonNode>> future : artistFutures) {
+                try {
+                    collectedTracks.addAll(future.get());
+                } catch (Exception ignored) {}
+            }
+
+            Collections.shuffle(collectedTracks);
+            for (int i = 0; i < Math.min(5, collectedTracks.size()); i++) {
+                recommendations.add(convertSpotifyTrackToMap(collectedTracks.get(i)));
+            }
+        }
+
+        executor.shutdown();
+        return recommendations;
+    }
+
+    private Map<String, Object> convertSpotifyTrackToMap(JsonNode trackNode) {
+        Map<String, Object> trackInfo = new HashMap<>();
+        trackInfo.put("name", trackNode.get("name").asText());
+        trackInfo.put("artist", trackNode.get("artists").get(0).get("name").asText());
+        trackInfo.put("uri", trackNode.get("uri").asText());
+        trackInfo.put("album", trackNode.get("album").get("name").asText());
+        trackInfo.put("image", trackNode.get("album").get("images").get(0).get("url").asText());
+        return trackInfo;
+    }
+
+
+
 
     public List<Map<String, Object>> searchTracksByArtist(String artistName) {
         try {
@@ -163,7 +236,6 @@ public class SpotifyService {
         }
     }
 
-
     public List<Map<String, Object>> searchArtists(String query) {
         try {
             String accessToken = getAccessToken();
@@ -172,7 +244,7 @@ public class SpotifyService {
             String url = UriComponentsBuilder.fromHttpUrl(SPOTIFY_API_BASE_URL)
                     .queryParam("q", query)
                     .queryParam("type", "artist")
-                    .queryParam("limit", 30)
+                    .queryParam("limit", 20)
                     .toUriString();
             ResponseEntity<Map> response = restTemplate.exchange(
                     url,
@@ -205,7 +277,7 @@ public class SpotifyService {
             String url = UriComponentsBuilder.fromHttpUrl(SPOTIFY_API_BASE_URL)
                     .queryParam("q", query)
                     .queryParam("type", "track")
-                    .queryParam("limit", 30)
+                    .queryParam("limit", 20)
                     .toUriString();
             ResponseEntity<Map> response = restTemplate.exchange(
                     url,
@@ -278,7 +350,7 @@ public class SpotifyService {
 
             return artistFrequency.entrySet().stream()
                     .sorted((a, b) -> b.getValue() - a.getValue())
-                    .limit(20)
+                    .limit(10)
                     .map(entry -> {
                         Map<String, Object> artistMap = new HashMap<>();
                         artistMap.put("name", entry.getKey());
@@ -297,7 +369,7 @@ public class SpotifyService {
             String accessToken = getAccessToken();
             HttpHeaders headers = new HttpHeaders();
             headers.set("Authorization", "Bearer " + accessToken);
-            String url = SPOTIFY_PLAYLIST_URL + playlistId + "/tracks?limit=20";
+            String url = SPOTIFY_PLAYLIST_URL + playlistId + "/tracks?limit=10";
             HttpEntity<String> entity = new HttpEntity<>(headers);
             ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
             ObjectMapper mapper = new ObjectMapper();
@@ -324,42 +396,93 @@ public class SpotifyService {
         }
     }
 
-    public List<Map<String, Object>> getRecommendations(String seedTrackUri) {
-        try {
-            String accessToken = getAccessToken();
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", "Bearer " + accessToken);
-            String url = UriComponentsBuilder.fromHttpUrl("https://api.spotify.com/v1/recommendations")
-                    .queryParam("seed_tracks", seedTrackUri)
-                    .queryParam("limit", 10)
-                    .toUriString();
-            ResponseEntity<String> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.GET,
-                    new HttpEntity<>(headers),
-                    String.class
-            );
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode tracks = mapper.readTree(response.getBody()).get("tracks");
-            List<Map<String, Object>> recommendations = new ArrayList<>();
-
-            for (JsonNode track : tracks) {
-                Map<String, Object> trackData = new HashMap<>();
-                trackData.put("name", track.get("name").asText());
-                trackData.put("artist", track.get("artists").findValues("name").stream()
-                        .map(JsonNode::asText)
-                        .collect(Collectors.joining(", ")));
-                trackData.put("album", track.get("album").get("name").asText());
-                trackData.put("images", track.get("album").get("images"));
-                trackData.put("uri", track.get("uri").asText());
-                recommendations.add(trackData);
-            }
-            return recommendations;
-        } catch (Exception e) {
-            System.err.println("Error in getRecommendations: " + e.getMessage());
-            throw new RuntimeException("Spotify API request failed", e);
-        }
-    }
-
-
 }
+
+//    public void storeRefreshTokenForUser(String userId, String refreshToken) {
+//        Users user = repo.findById(Integer.parseInt(userId))
+//                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
+//        user.setSpotify(refreshToken);
+//        repo.save(user);
+//    }
+//
+//    public URI getSpotifyLoginUrl(String userId) {
+//        String spotifyAuthUrl = String.format(
+//                "https://accounts.spotify.com/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&state=%s",
+//                clientId,
+//                URLEncoder.encode(redirectUri, StandardCharsets.UTF_8),
+//                URLEncoder.encode(scopes, StandardCharsets.UTF_8),
+//                URLEncoder.encode(userId, StandardCharsets.UTF_8)
+//        );
+//        return URI.create(spotifyAuthUrl);
+//    }
+//
+//    public String refreshAccessToken(String userId) {
+//        Users user = repo.findById(Integer.parseInt(userId))
+//                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
+//        String refreshToken = user.getSpotify();
+//        String tokenUrl = SPOTIFY_TOKEN_URL;
+//        HttpHeaders headers = new HttpHeaders();
+//        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+//        headers.setBasicAuth(clientId, clientSecret);
+//        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+//        body.add("grant_type", "refresh_token");
+//        body.add("refresh_token", refreshToken);
+//        HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
+//        ResponseEntity<Map> response = restTemplate.exchange(tokenUrl, HttpMethod.POST, request, Map.class);
+//        Map<String, Object> responseBody = response.getBody();
+//        if (responseBody != null && responseBody.containsKey("access_token")) {
+//            return (String) responseBody.get("access_token");
+//        } else {
+//            throw new RuntimeException("Error refreshing access token from Spotify");
+//        }
+//    }
+//
+//    public List<Map<String, Object>> getUserPlaylists(String userId) {
+//        try {
+//            String accessToken = refreshAccessToken(userId);
+//            HttpHeaders headers = new HttpHeaders();
+//            headers.set("Authorization", "Bearer " + accessToken);
+//            String url = "https://api.spotify.com/v1/me/playlists";
+//            HttpEntity<String> entity = new HttpEntity<>(headers);
+//            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+//            ObjectMapper mapper = new ObjectMapper();
+//            JsonNode playlists = mapper.readTree(response.getBody()).get("items");
+//            List<Map<String, Object>> playlistDetails = new ArrayList<>();
+//            for (JsonNode playlist : playlists) {
+//                Map<String, Object> playlistData = new HashMap<>();
+//                playlistData.put("id", playlist.get("id").asText());
+//                playlistData.put("name", playlist.get("name").asText());
+//                playlistData.put("description", playlist.get("description").asText());
+//                playlistData.put("image", playlist.get("images").size() > 0
+//                        ? playlist.get("images").get(0).get("url").asText()
+//                        : null);
+//                playlistData.put("tracks", playlist.get("tracks").get("total").asInt());
+//                playlistDetails.add(playlistData);
+//            }
+//            return playlistDetails;
+//        } catch (Exception e) {
+//            System.err.println("Error in getUserPlaylists: " + e.getMessage());
+//            throw new RuntimeException("Spotify API request failed", e);
+//        }
+//    }
+//
+//    public String exchangeAuthorizationCodeForTokens(String code, String userId) {
+//        String tokenUrl = SPOTIFY_TOKEN_URL;
+//        HttpHeaders headers = new HttpHeaders();
+//        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+//        headers.setBasicAuth(clientId, clientSecret);
+//        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+//        body.add("grant_type", "authorization_code");
+//        body.add("code", code);
+//        body.add("redirect_uri", redirectUri);
+//        HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
+//        ResponseEntity<Map> response = restTemplate.exchange(tokenUrl, HttpMethod.POST, request, Map.class);
+//        Map<String, Object> responseBody = response.getBody();
+//        if (responseBody != null && responseBody.containsKey("refresh_token")) {
+//            String refreshToken = (String) responseBody.get("refresh_token");
+//            storeRefreshTokenForUser(userId, refreshToken);
+//            return refreshToken;
+//        } else {
+//            throw new RuntimeException("Error fetching refresh token from Spotify");
+//        }
+//    }

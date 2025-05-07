@@ -1,6 +1,7 @@
 package com.jzk.motif_backend.controller;
 
 import com.jzk.motif_backend.service.SpotifyService;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,41 +30,29 @@ public class SpotifyController {
         return combinedResults;
     }
 
-    @GetMapping("/spotify/login")
-    public ResponseEntity<Void> initiateLogin(@RequestParam("userId") String userId) {
-        URI spotifyAuthUrl = service.getSpotifyLoginUrl(userId);
-        return ResponseEntity.status(HttpStatus.FOUND).location(spotifyAuthUrl).build();
-    }
-
-
-
-    @GetMapping("/spotify/callback")
-    public ResponseEntity<String> handleCallback(
-            @RequestParam("code") String code,
-            @RequestParam("state") String userId // Retrieve the userId from the state parameter
-    ) {
-        try {
-            // Exchange the authorization code for tokens, passing both `code` and `userId`
-            String refreshToken = service.exchangeAuthorizationCodeForTokens(code, userId);
-
-            return ResponseEntity.ok("Refresh token stored successfully.");
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Error fetching or storing refresh token");
-        }
-    }
-
-
-
+//    @GetMapping("/spotify/recommendations")
+//    public ResponseEntity<List<Map<String, Object>>> getRecommendations(@RequestParam("trackUri") String trackUri) {
+//        try {
+//            List<Map<String, Object>> recommendations = service.getRecommendations(trackUri);
+//            return ResponseEntity.ok(recommendations);
+//        } catch (Exception e) {
+//            return ResponseEntity.status(500).body(null);
+//        }
+//    }
 
     @GetMapping("/spotify/recommendations")
-    public ResponseEntity<List<Map<String, Object>>> getRecommendations(@RequestParam("trackUri") String trackUri) {
+    public ResponseEntity<List<Map<String, Object>>> getRecommendations(@RequestParam("trackUri") String trackId) {
         try {
-            List<Map<String, Object>> recommendations = service.getRecommendations(trackUri);
+            List<Map<String, Object>> recommendations = service.getRecommendations(trackId);
             return ResponseEntity.ok(recommendations);
         } catch (Exception e) {
-            return ResponseEntity.status(500).body(null);
+            System.err.println("Error in /spotify/recommendations: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
         }
     }
+
+
+
 
     @GetMapping("/search/artists")
     public List<Map<String, Object>> searchArtists(@RequestParam String query) {
@@ -91,3 +80,38 @@ public class SpotifyController {
     }
 
 }
+
+
+//    @GetMapping("/spotify/login")
+//    public ResponseEntity<Void> initiateLogin(@RequestParam("userId") String userId) {
+//        URI spotifyAuthUrl = service.getSpotifyLoginUrl(userId);
+//        return ResponseEntity.status(HttpStatus.FOUND).location(spotifyAuthUrl).build();
+//    }
+
+//    @GetMapping("/spotify/callback")
+//    public ResponseEntity<Void> handleCallback(
+//            @RequestParam("code") String code,
+//            @RequestParam("state") String userId,
+//            HttpServletResponse response) {
+//        try {
+//            String refreshToken = service.exchangeAuthorizationCodeForTokens(code, userId);
+//
+//            // Redirect to frontend
+//            String redirectUrl = "http://localhost:3000/saved";
+//            response.sendRedirect(redirectUrl);
+//            return ResponseEntity.status(HttpStatus.FOUND).build();
+//        } catch (Exception e) {
+//            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+//        }
+//    }
+
+
+//    @GetMapping("/spotify/playlists")
+//    public ResponseEntity<List<Map<String, Object>>> getUserPlaylists(@RequestParam("userId") String userId) {
+//        try {
+//            List<Map<String, Object>> playlists = service.getUserPlaylists(userId);
+//            return ResponseEntity.ok(playlists);
+//        } catch (Exception e) {
+//            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+//        }
+//    }

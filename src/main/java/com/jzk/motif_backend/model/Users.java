@@ -53,6 +53,9 @@ public class Users {
                 "id=" + id +
                 ", username='" + username + '\'' +
                 ", password='" + password + '\'' +
+                ", profile_pic='" + profile_pic + '\'' +
+                ", spotify='" + spotify + '\'' +
+                ", playlists=" + playlists +
                 '}';
     }
 }
