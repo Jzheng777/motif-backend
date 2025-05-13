@@ -42,6 +42,30 @@ public class UserService {
         return user;
     }
 
+    public Map<String, Object> registerAndAuthenticate(Users user) {
+        user.setPassword(encoder.encode(user.getPassword()));
+        repo.save(user);
+
+        // Authenticate and return token like in verify()
+        Authentication auth = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(user.getUsername(), user.getPassword())
+        );
+
+        if (auth.isAuthenticated()) {
+            Users authenticatedUser = repo.findByUsername(user.getUsername());
+            String token = jwtService.generateToken(authenticatedUser.getUsername());
+            int userId = authenticatedUser.getId();
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("token", token);
+            response.put("userId", userId);
+            return response;
+        } else {
+            throw new RuntimeException("Authentication failed after registration");
+        }
+    }
+
+
     public Map<String, Object> verify(Users user) {
         try {
             Authentication auth = authenticationManager.authenticate(

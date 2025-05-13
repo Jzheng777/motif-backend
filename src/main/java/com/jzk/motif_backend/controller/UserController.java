@@ -18,10 +18,16 @@ public class UserController {
         this.service = service;
     }
 
+//    @PostMapping("/auth/register")
+//    public Users register(@RequestBody Users user) {
+//        return service.register(user);
+//    }
+
     @PostMapping("/auth/register")
-    public Users register(@RequestBody Users user) {
-        return service.register(user);
+    public Map<String, Object> register(@RequestBody Users user) {
+        return service.registerAndAuthenticate(user);
     }
+
 
     @GetMapping("/api/user/{id}")
     public Map<String, Object> profile(@PathVariable Integer id) {
