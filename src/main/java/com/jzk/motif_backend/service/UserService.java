@@ -43,12 +43,13 @@ public class UserService {
     }
 
     public Map<String, Object> registerAndAuthenticate(Users user) {
-        user.setPassword(encoder.encode(user.getPassword()));
+        String rawPassword = user.getPassword(); // save the plain password
+        user.setPassword(encoder.encode(rawPassword));
         repo.save(user);
 
-        // Authenticate and return token like in verify()
+        // Now authenticate using raw password
         Authentication auth = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(user.getUsername(), user.getPassword())
+                new UsernamePasswordAuthenticationToken(user.getUsername(), rawPassword)
         );
 
         if (auth.isAuthenticated()) {
@@ -64,6 +65,7 @@ public class UserService {
             throw new RuntimeException("Authentication failed after registration");
         }
     }
+
 
 
     public Map<String, Object> verify(Users user) {
